@@ -18,6 +18,12 @@ struct ContentView: View {
     @State private var inputItem: PhotosPickerItem?
     @State private var maskItem: PhotosPickerItem?
     @State private var invertMask = false
+    @State private var maskMode: MaskMode = .manual
+    
+    enum MaskMode: String, CaseIterable {
+        case manual = "Manual"
+        case segmentation = "Auto Segmentation"
+    }
     
     var body: some View {
         NavigationView {
@@ -124,52 +130,94 @@ struct ContentView: View {
                     // Mask Section
                     VStack(alignment: .leading, spacing: 15) {
                         HStack {
-                            Text("2. Mask Image")
+                            Text("2. Mask Generation")
                                 .font(.headline)
                             Spacer()
-                            if maskImage != nil && UIImage(named: "mask") == maskImage {
-                                HStack {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.green)
-                                    Text("Demo")
-                                        .font(.caption)
-                                        .foregroundColor(.green)
+                        }
+                        
+                        // Mask Mode Picker
+                        Picker("Mask Mode", selection: $maskMode) {
+                            ForEach(MaskMode.allCases, id: \.self) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                        .onChange(of: maskMode) { _, _ in
+                            // Clear mask when mode changes
+                            maskImage = nil
+                        }
+                        
+                        // Manual Mask Selection
+                        if maskMode == .manual {
+                            PhotosPicker(selection: $maskItem, matching: .images) {
+                                if let maskImage = maskImage {
+                                    Image(uiImage: maskImage)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .frame(maxHeight: 200)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(Color.green, lineWidth: 2)
+                                        )
+                                } else {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.gray.opacity(0.3))
+                                        .frame(height: 150)
+                                        .overlay(
+                                            VStack {
+                                                Image(systemName: "photo.badge.plus")
+                                                    .font(.largeTitle)
+                                                    .foregroundColor(.green)
+                                                Text("Tap to select mask image")
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        )
+                                }
+                            }
+                            .onChange(of: maskItem) { _, newItem in
+                                Task {
+                                    if let data = try? await newItem?.loadTransferable(type: Data.self),
+                                       let uiImage = UIImage(data: data) {
+                                        maskImage = uiImage
+                                    }
                                 }
                             }
                         }
                         
-                        PhotosPicker(selection: $maskItem, matching: .images) {
-                            if let maskImage = maskImage {
-                                Image(uiImage: maskImage)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(maxHeight: 200)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .stroke(Color.green, lineWidth: 2)
-                                    )
-                            } else {
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color.gray.opacity(0.3))
-                                    .frame(height: 150)
-                                    .overlay(
-                                        VStack {
-                                            Image(systemName: "photo.badge.plus")
-                                                .font(.largeTitle)
-                                                .foregroundColor(.green)
-                                            Text("Tap to select mask image")
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
+                        // Auto Segmentation
+                        if maskMode == .segmentation {
+                            VStack(spacing: 10) {
+                                Button(action: generateMaskFromSegmentation) {
+                                    HStack {
+                                        if inPaintingManager.isGeneratingMask {
+                                            ProgressView()
+                                                .scaleEffect(0.8)
+                                        } else {
+                                            Image(systemName: "wand.and.stars")
                                         }
-                                    )
-                            }
-                        }
-                        .onChange(of: maskItem) { _, newItem in
-                            Task {
-                                if let data = try? await newItem?.loadTransferable(type: Data.self),
-                                   let uiImage = UIImage(data: data) {
-                                    maskImage = uiImage
+                                        Text(inPaintingManager.isGeneratingMask ? "Analyzing..." : "Generate Mask from Image")
+                                    }
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(inputImage != nil ? Color.purple : Color.gray)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                }
+                                .disabled(inputImage == nil || inPaintingManager.isGeneratingMask)
+                                
+                                if let maskImage = maskImage {
+                                    Image(uiImage: maskImage)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .frame(maxHeight: 200)
+                                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(Color.purple, lineWidth: 2)
+                                        )
                                 }
                             }
                         }
@@ -332,6 +380,16 @@ struct ContentView: View {
         
         // Clear previous result
         resultImage = nil
+    }
+    
+    private func generateMaskFromSegmentation() {
+        guard let inputImage = inputImage else { return }
+        
+        inPaintingManager.generateMaskFromSegmentation(inputImage: inputImage) { generatedMask in
+            Task { @MainActor in
+                self.maskImage = generatedMask
+            }
+        }
     }
 }
 

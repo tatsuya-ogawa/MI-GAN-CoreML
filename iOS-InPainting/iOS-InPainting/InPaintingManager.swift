@@ -14,6 +14,9 @@ class InPaintingManager: ObservableObject {
     private var model: migan_512_coreml?
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var isGeneratingMask = false
+    @Published var availableSegments: [String] = []
+    @Published var segmentationResults: [String: UIImage] = [:]
     
     init() {
         loadModel()
@@ -272,6 +275,123 @@ class InPaintingManager: ObservableObject {
         
         print("✅ Successfully created UIImage from CGImage")
         return UIImage(cgImage: cgImage)
+    }
+    
+    // MARK: - Automatic Mask Generation from Segmentation
+    
+    func generateMaskFromSegmentation(inputImage: UIImage, completion: @escaping (UIImage?) -> Void) {
+        guard let cgImage = inputImage.cgImage else {
+            completion(nil)
+            return
+        }
+        
+        isGeneratingMask = true
+        availableSegments.removeAll()
+        segmentationResults.removeAll()
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // First try person segmentation
+            self?.performPersonSegmentation(cgImage: cgImage) { personMask in
+                if let personMask = personMask {
+                    Task { @MainActor in
+                        self?.availableSegments.append("Person")
+                        self?.segmentationResults["Person"] = personMask
+                        self?.isGeneratingMask = false
+                        completion(personMask)
+                    }
+                } else {
+                    // If no person detected, try general object detection
+                    self?.performObjectDetection(cgImage: cgImage) { objectMask in
+                        Task { @MainActor in
+                            self?.isGeneratingMask = false
+                            completion(objectMask)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func performPersonSegmentation(cgImage: CGImage, completion: @escaping (UIImage?) -> Void) {
+        let request = VNGeneratePersonSegmentationRequest { [weak self] request, error in
+            guard error == nil,
+                  let observation = request.results?.first as? VNPixelBufferObservation else {
+                print("❌ Person segmentation failed: \(error?.localizedDescription ?? "Unknown error")")
+                completion(nil)
+                return
+            }
+            
+            let maskImage = self?.pixelBufferToUIImage(pixelBuffer: observation.pixelBuffer)
+            completion(maskImage)
+        }
+        
+        request.qualityLevel = .accurate
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            print("❌ Failed to perform person segmentation: \(error.localizedDescription)")
+            completion(nil)
+        }
+    }
+    
+    private func performObjectDetection(cgImage: CGImage, completion: @escaping (UIImage?) -> Void) {
+        // Use VNClassifyImageRequest for general object detection
+        let classificationRequest = VNClassifyImageRequest { [weak self] request, error in
+            guard error == nil,
+                  let observations = request.results as? [VNClassificationObservation] else {
+                print("❌ Object detection failed: \(error?.localizedDescription ?? "Unknown error")")
+                completion(nil)
+                return
+            }
+            
+            // Get top classifications with confidence > 0.3
+            let significantObjects = observations.filter { $0.confidence > 0.3 }
+            print("🔍 Detected objects: \(significantObjects.map { "\($0.identifier): \($0.confidence)" })")
+            
+            if !significantObjects.isEmpty {
+                // For now, create a center mask as placeholder
+                // In a real implementation, you'd use object detection to create precise masks
+                let placeholderMask = self?.createCenterMask(size: CGSize(width: cgImage.width, height: cgImage.height))
+                self?.availableSegments.append("Center Region")
+                if let mask = placeholderMask {
+                    self?.segmentationResults["Center Region"] = mask
+                }
+                completion(placeholderMask)
+            } else {
+                completion(nil)
+            }
+        }
+        
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        do {
+            try handler.perform([classificationRequest])
+        } catch {
+            print("❌ Failed to perform object detection: \(error.localizedDescription)")
+            completion(nil)
+        }
+    }
+    
+    private func createCenterMask(size: CGSize) -> UIImage? {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            // Black background
+            context.cgContext.setFillColor(UIColor.black.cgColor)
+            context.fill(CGRect(origin: .zero, size: size))
+            
+            // White center circle (25% of image size)
+            let centerX = size.width / 2
+            let centerY = size.height / 2
+            let radius = min(size.width, size.height) * 0.25
+            
+            context.cgContext.setFillColor(UIColor.white.cgColor)
+            context.cgContext.fillEllipse(in: CGRect(x: centerX - radius,
+                                                   y: centerY - radius,
+                                                   width: radius * 2,
+                                                   height: radius * 2))
+        }
     }
     
     private func pixelBufferToUIImage(pixelBuffer: CVPixelBuffer) -> UIImage? {
