@@ -1,0 +1,6 @@
+.python-version
+venv/
+.claude
+MI-GAN/
+migan_256_places2.pt
+migan_512_places2.pt
