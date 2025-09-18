@@ -19,10 +19,17 @@ struct ContentView: View {
     @State private var maskItem: PhotosPickerItem?
     @State private var invertMask = false
     @State private var maskMode: MaskMode = .manual
+    @State private var displayMode: DisplayMode = .result
     
     enum MaskMode: String, CaseIterable {
         case manual = "Manual"
         case segmentation = "Auto Segmentation"
+    }
+
+    enum DisplayMode: String, CaseIterable {
+        case result = "Result"
+        case original = "Original"
+        case composite = "Composite"
     }
     
     var body: some View {
@@ -279,7 +286,7 @@ struct ContentView: View {
                 if let resultImage = resultImage {
                     VStack(spacing: 20) {
                         HStack {
-                            Text("Result")
+                            Text(displayMode.rawValue)
                                 .font(.largeTitle)
                                 .fontWeight(.bold)
                             Spacer()
@@ -292,20 +299,78 @@ struct ContentView: View {
                             }
                         }
                         .padding()
-                        
-                        Image(uiImage: resultImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .clipShape(RoundedRectangle(cornerRadius: 15))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 15)
-                                    .stroke(Color.orange, lineWidth: 3)
-                            )
-                            .shadow(radius: 10)
-                            .onAppear {
-                                print("🖼️ Result image is being displayed in main content")
+
+                        // Display Mode Picker
+                        Picker("Display Mode", selection: $displayMode) {
+                            ForEach(DisplayMode.allCases, id: \.self) { mode in
+                                Text(mode.rawValue).tag(mode)
                             }
-                        
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                        .disabled(inputImage == nil)
+
+                        // Display current image based on mode
+                        Group {
+                            if displayMode == .original, let inputImage = inputImage {
+                                // Side-by-side comparison for original mode
+                                HStack(spacing: 15) {
+                                    VStack {
+                                        Text("Original")
+                                            .font(.headline)
+                                            .foregroundColor(.blue)
+                                        Image(uiImage: inputImage)
+                                            .resizable()
+                                            .aspectRatio(contentMode: .fit)
+                                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 10)
+                                                    .stroke(Color.blue, lineWidth: 2)
+                                            )
+                                            .shadow(radius: 5)
+                                    }
+
+                                    VStack {
+                                        Text("Result")
+                                            .font(.headline)
+                                            .foregroundColor(.orange)
+                                        Image(uiImage: resultImage)
+                                            .resizable()
+                                            .aspectRatio(contentMode: .fit)
+                                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 10)
+                                                    .stroke(Color.orange, lineWidth: 2)
+                                            )
+                                            .shadow(radius: 5)
+                                    }
+                                }
+                            } else if displayMode == .composite, let compositeImage = createCompositeImage() {
+                                Image(uiImage: compositeImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .clipShape(RoundedRectangle(cornerRadius: 15))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 15)
+                                            .stroke(Color.purple, lineWidth: 3)
+                                    )
+                                    .shadow(radius: 10)
+                            } else {
+                                Image(uiImage: resultImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .clipShape(RoundedRectangle(cornerRadius: 15))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 15)
+                                            .stroke(Color.orange, lineWidth: 3)
+                                    )
+                                    .shadow(radius: 10)
+                                    .onAppear {
+                                        print("🖼️ Result image is being displayed in main content")
+                                    }
+                            }
+                        }
+                        .animation(.easeInOut(duration: 0.3), value: displayMode)
+
                         Button(action: saveResult) {
                             HStack {
                                 Image(systemName: "square.and.arrow.down")
@@ -319,7 +384,7 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                         }
                         .padding(.bottom)
-                        
+
                         Spacer()
                     }
                     .padding()
@@ -346,13 +411,14 @@ struct ContentView: View {
     }
     
     private func processInPainting() {
-        guard let inputImage = inputImage, let maskImage = maskImage else { 
+        guard let inputImage = inputImage, let maskImage = maskImage else {
             print("❌ Input or mask image is nil")
-            return 
+            return
         }
-        
+
         print("🎬 Processing inpainting...")
         resultImage = nil
+        displayMode = .result // Reset to result mode when processing new result
         inPaintingManager.performInPainting(inputImage: inputImage, maskImage: maskImage, invertMask: invertMask) { result in
             print("📱 Received result in ContentView: \(result != nil ? "Success" : "Failed")")
             Task { @MainActor in
@@ -372,24 +438,40 @@ struct ContentView: View {
         if let demoInputImage = UIImage(named: "input") {
             inputImage = demoInputImage
         }
-        
+
         // Load demo mask image
         if let demoMaskImage = UIImage(named: "mask") {
             maskImage = demoMaskImage
         }
-        
-        // Clear previous result
+
+        // Clear previous result and reset display mode
         resultImage = nil
+        displayMode = .result
     }
     
     private func generateMaskFromSegmentation() {
         guard let inputImage = inputImage else { return }
-        
+
         inPaintingManager.generateMaskFromSegmentation(inputImage: inputImage) { generatedMask in
             Task { @MainActor in
                 self.maskImage = generatedMask
             }
         }
+    }
+
+    private func createCompositeImage() -> UIImage? {
+        guard let inputImage = inputImage,
+              let resultImage = resultImage,
+              let maskImage = maskImage else {
+            return nil
+        }
+
+        return inPaintingManager.createMaskedComposition(
+            originalImage: inputImage,
+            resultImage: resultImage,
+            maskImage: maskImage,
+            invertMask: invertMask
+        )
     }
 }
 

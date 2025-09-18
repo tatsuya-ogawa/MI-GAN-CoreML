@@ -276,7 +276,115 @@ class InPaintingManager: ObservableObject {
         print("✅ Successfully created UIImage from CGImage")
         return UIImage(cgImage: cgImage)
     }
-    
+
+    // MARK: - Image Composition
+
+    func createMaskedComposition(originalImage: UIImage, resultImage: UIImage, maskImage: UIImage, invertMask: Bool) -> UIImage? {
+        let size = CGSize(width: 512, height: 512)
+
+        // Resize all images to the same size
+        guard let resizedOriginal = resizeImage(originalImage, to: size),
+              let resizedResult = resizeImage(resultImage, to: size),
+              let resizedMask = resizeImage(maskImage, to: size) else {
+            return nil
+        }
+
+        UIGraphicsBeginImageContextWithOptions(size, false, 1.0)
+        defer { UIGraphicsEndImageContext() }
+
+        guard let context = UIGraphicsGetCurrentContext() else { return nil }
+
+        // Draw result image as base
+        resizedResult.draw(in: CGRect(origin: .zero, size: size))
+
+        // Create mask for blending - we want to overlay the MASKED part of original image
+        guard let maskCGImage = resizedMask.cgImage else { return nil }
+
+        // Create a mask context to process mask values
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        let maskWidth = Int(size.width)
+        let maskHeight = Int(size.height)
+        var maskData = Data(count: maskWidth * maskHeight)
+
+        maskData.withUnsafeMutableBytes { bytes in
+            guard let maskContext = CGContext(data: bytes.baseAddress,
+                                            width: maskWidth,
+                                            height: maskHeight,
+                                            bitsPerComponent: 8,
+                                            bytesPerRow: maskWidth,
+                                            space: colorSpace,
+                                            bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+                return
+            }
+            maskContext.draw(maskCGImage, in: CGRect(x: 0, y: 0, width: maskWidth, height: maskHeight))
+        }
+
+        // Draw original image pixels WHERE the mask indicates (the holes that were inpainted)
+        guard let originalCGImage = resizedOriginal.cgImage else { return nil }
+        let originalData = originalCGImage.dataProvider?.data
+        guard let originalBytes = CFDataGetBytePtr(originalData) else { return nil }
+
+        // Get current result image data
+        guard let resultCGImage = resizedResult.cgImage else { return nil }
+        let resultData = resultCGImage.dataProvider?.data
+        guard let resultBytes = CFDataGetBytePtr(resultData) else { return nil }
+
+        // Create new image data by blending based on mask
+        var compositeData = Data(count: maskWidth * maskHeight * 4) // RGBA
+
+        compositeData.withUnsafeMutableBytes { compositeBytes in
+            let compositeBuff = compositeBytes.bindMemory(to: UInt8.self)
+            let maskBuff = maskData.withUnsafeBytes { $0.bindMemory(to: UInt8.self) }
+
+            for y in 0..<maskHeight {
+                for x in 0..<maskWidth {
+                    let pixelIndex = y * maskWidth + x
+                    let byteIndex = pixelIndex * 4
+                    let maskValue = Float(maskBuff[pixelIndex]) / 255.0
+
+                    // For composite: show original image WHERE it was masked (the holes)
+                    // This is the OPPOSITE of normal inpainting logic
+                    let shouldShowOriginalHole = invertMask ? (maskValue > 0.5) : (maskValue < 0.5)
+
+                    if shouldShowOriginalHole {
+                        // Show the original image pixel (the part that was cut out)
+                        compositeBuff[byteIndex] = originalBytes[byteIndex]     // R
+                        compositeBuff[byteIndex + 1] = originalBytes[byteIndex + 1] // G
+                        compositeBuff[byteIndex + 2] = originalBytes[byteIndex + 2] // B
+                        compositeBuff[byteIndex + 3] = 255 // A
+                    } else {
+                        // Use result image pixel (the inpainted area)
+                        compositeBuff[byteIndex] = resultBytes[byteIndex]     // R
+                        compositeBuff[byteIndex + 1] = resultBytes[byteIndex + 1] // G
+                        compositeBuff[byteIndex + 2] = resultBytes[byteIndex + 2] // B
+                        compositeBuff[byteIndex + 3] = 255 // A
+                    }
+                }
+            }
+        }
+
+        // Create CGImage from composite data
+        let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let bytesPerRow = maskWidth * 4
+
+        guard let dataProvider = CGDataProvider(data: compositeData as CFData) else { return nil }
+
+        guard let compositeCGImage = CGImage(width: maskWidth,
+                                           height: maskHeight,
+                                           bitsPerComponent: 8,
+                                           bitsPerPixel: 32,
+                                           bytesPerRow: bytesPerRow,
+                                           space: rgbColorSpace,
+                                           bitmapInfo: bitmapInfo,
+                                           provider: dataProvider,
+                                           decode: nil,
+                                           shouldInterpolate: false,
+                                           intent: .defaultIntent) else { return nil }
+
+        return UIImage(cgImage: compositeCGImage)
+    }
+
     // MARK: - Automatic Mask Generation from Segmentation
     
     func generateMaskFromSegmentation(inputImage: UIImage, completion: @escaping (UIImage?) -> Void) {
